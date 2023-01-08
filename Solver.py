@@ -91,13 +91,17 @@ class Solver:
         self.used = {self.depot.ID}
         self.sol = None
         self.bestSolution = None
+        self.minTabuTenure = 50
+        self.maxTabuTenure = 60
+        self.tabuTenure = 20
 
     def solve(self):
         self.SetRoutedFlagToFalseForAllCustomers()
         self.ApplyNearestNeighborMethod()
         # self.MinimumInsertions()
         self.ReportSolution(self.sol)
-        self.LocalSearch(0)
+        # self.LocalSearch(0)
+        self.TabuSearch(0)
         return self.sol
 
     def SetRoutedFlagToFalseForAllCustomers(self):
@@ -151,50 +155,61 @@ class Solver:
                 rt = Route(self.depot, self.capacity)
                 self.sol.routes.append(rt)
 
-    def LocalSearch(self, operator):
+    # 
+    
+    def TabuSearch(self, operator):
+        solution_cost_trajectory = []
+        random.seed(1)
         self.bestSolution = self.cloneSolution(self.sol)
         terminationCondition = False
         localSearchIterator = 0
 
         rm = RelocationMove()
         sm = SwapMove()
-        top = TwoOptMove()
+        top:TwoOptMove = TwoOptMove()
+
+        SolDrawer.draw(0, self.sol, self.allNodes)
 
         while terminationCondition is False:
+            operator = random.randint(0,2)
 
-            self.InitializeOperators(rm, sm, top)
-            SolDrawer.draw(localSearchIterator, self.sol, self.allNodes)
+            rm.Initialize()
+            sm.Initialize()
+            top.Initialize()
 
             # Relocations
             if operator == 0:
-                self.FindBestRelocationMove(rm)
+                self.FindBestRelocationMove(rm, localSearchIterator)
                 if rm.originRoutePosition is not None:
-                    if rm.moveCost < 0:
-                        self.ApplyRelocationMove(rm)
-                    else:
-                        terminationCondition = True
+                    self.ApplyRelocationMove(rm, localSearchIterator)
             # Swaps
             elif operator == 1:
-                self.FindBestSwapMove(sm)
+                self.FindBestSwapMove(sm, localSearchIterator)
                 if sm.positionOfFirstRoute is not None:
-                    if sm.moveCost < 0:
-                        self.ApplySwapMove(sm)
-                    else:
-                        terminationCondition = True
-            # two opt
+                    self.ApplySwapMove(sm, localSearchIterator)
             elif operator == 2:
-                self.FindBestTwoOptMove(top)
+                self.FindBestTwoOptMove(top, localSearchIterator)
                 if top.positionOfFirstRoute is not None:
-                    if top.moveCost < 0:
-                        self.ApplyTwoOptMove(top)
-                    else:
-                        terminationCondition = True
+                    self.ApplyTwoOptMove(top, localSearchIterator)
 
-            if self.sol.cost < self.bestSolution.cost:
+            # self.ReportSolution(self.sol)
+            self.TestSolution()
+            solution_cost_trajectory.append(self.sol.cost)
+
+            print(localSearchIterator, self.sol.cost, self.bestSolution.cost)
+
+            if (self.sol.cost < self.bestSolution.cost):
                 self.bestSolution = self.cloneSolution(self.sol)
 
+            # SolDrawer.draw(localSearchIterator, self.sol, self.allNodes)
+
             localSearchIterator = localSearchIterator + 1
-            print(localSearchIterator, self.sol.cost)
+
+            if localSearchIterator > 10000:
+                terminationCondition = True
+
+        SolDrawer.draw('final_ts', self.bestSolution, self.allNodes)
+        SolDrawer.drawTrajectory(solution_cost_trajectory)
 
         self.sol = self.bestSolution
 
@@ -214,7 +229,7 @@ class Solver:
         cloned.cost = self.sol.cost
         return cloned
 
-    def FindBestRelocationMove(self, rm):
+    def FindBestRelocationMove(self, rm, localSearchIterator):
         for originRouteIndex in range(0, len(self.sol.routes)):
             rt1: Route = self.sol.routes[originRouteIndex]
             for originNodeIndex in range(1, len(rt1.sequenceOfNodes) - 1):
@@ -294,12 +309,16 @@ class Solver:
                         # targetRtCostChange = c2 - rt2.cost
                         # moveCost = new_cost - oldCost
 
+                        # Tabu check
+                        if (self.MoveIsTabu(B, localSearchIterator, moveCost)):
+                            continue
+
                         if moveCost < rm.moveCost:
                             self.StoreBestRelocationMove(originRouteIndex, targetRouteIndex, originNodeIndex,
                                                          targetNodeIndex, moveCost, originRtCostChange,
                                                          targetRtCostChange, rm)
 
-    def FindBestSwapMove(self, sm):
+    def FindBestSwapMove(self, sm , localSearchIterator):
         for firstRouteIndex in range(0, len(self.sol.routes)):
             rt1: Route = self.sol.routes[firstRouteIndex]
             for secondRouteIndex in range(firstRouteIndex, len(self.sol.routes)):
@@ -372,11 +391,16 @@ class Solver:
                         # test_rt2.sequenceOfNodes[sm.positionOfFirstNode].positionInRoute = sm.positionOfFirstNode
                         # rt1.sequenceOfNodes[sm.positionOfSecondNode].positionInRoute = sm.positionOfSecondNode
                         #
+
+                        #Tabu search for BOTH nodes since we are swapping 
+                        if self.MoveIsTabu(b1, localSearchIterator, moveCost) or self.MoveIsTabu(b2, localSearchIterator, moveCost):
+                            continue
+
                         if moveCost < sm.moveCost:
                             self.StoreBestSwapMove(firstRouteIndex, secondRouteIndex, firstNodeIndex, secondNodeIndex,
                                                    moveCost, costChangeFirstRoute, costChangeSecondRoute, sm)
 
-    def ApplyRelocationMove(self, rm: RelocationMove):
+    def ApplyRelocationMove(self, rm: RelocationMove, localSearchIterator):
         oldCost = self.CalculateTotalCost(self.sol)
 
         originRt = self.sol.routes[rm.originRoutePosition]
@@ -403,6 +427,10 @@ class Solver:
         self.sol.cost += rm.moveCost
 
         newCost = self.CalculateTotalCost(self.sol)
+
+        # set node b tabu
+        self.SetTabuIterator(B, localSearchIterator)
+
         self.Update_Positions_In_Routes(originRt, targetRt)
         # debuggingOnly
         if abs((newCost - oldCost) - rm.moveCost) > 0.0001:
@@ -420,7 +448,7 @@ class Solver:
             n1: Node = rt2.sequenceOfNodes[i]
             n1.positionInRoute = i
 
-    def ApplySwapMove(self, sm):
+    def ApplySwapMove(self, sm, localSearchIterator):
         print("swaped the " + str(sm.positionOfFirstNode) + " node of the " +
               str(sm.positionOfFirstRoute) + " route " + " with the " + str(
             sm.positionOfSecondNode) + " node of the " + str(sm.positionOfSecondRoute) + " route")
@@ -448,6 +476,9 @@ class Solver:
         self.sol.cost += sm.moveCost
 
         newCost = self.CalculateTotalCost(self.sol)
+
+        self.SetTabuIterator(b1, localSearchIterator)
+        self.SetTabuIterator(b2, localSearchIterator)
         # debuggingOnly
         if abs((newCost - oldCost) - sm.moveCost) > 0.0001:
             print(newCost - oldCost)
@@ -501,7 +532,7 @@ class Solver:
         sm.Initialize()
         top.Initialize()
 
-    def FindBestTwoOptMove(self, top):
+    def FindBestTwoOptMove(self, top , localSearchIterator ):
         for rtInd1 in range(0, len(self.sol.routes)):
             rt1: Route = self.sol.routes[rtInd1]
             for rtInd2 in range(rtInd1, len(self.sol.routes)):
@@ -556,6 +587,11 @@ class Solver:
                             c2 = self.calculate_cost(test2)
                             cost_new = c1 + c2
                             moveCost = cost_new - cost_old
+                        
+                        # 4 nodes are involved in a 2opt move so need to check tabu status for each one
+                        if self.MoveIsTabu(A, localSearchIterator, moveCost) or self.MoveIsTabu(K, localSearchIterator, moveCost) or self.MoveIsTabu(B, localSearchIterator, moveCost) or self.MoveIsTabu(L, localSearchIterator, moveCost):
+                            continue
+
                         if moveCost < top.moveCost:
                             self.StoreBestTwoOptMove(rtInd1, rtInd2, nodeInd1, nodeInd2, moveCost, top)
 
@@ -600,7 +636,7 @@ class Solver:
             rt_load += from_node.demand
         return rt_cumulative_cost, rt_load
 
-    def ApplyTwoOptMove(self, top):
+    def ApplyTwoOptMove(self, top, localSearchIterator):
         rt1: Route = self.sol.routes[top.positionOfFirstRoute]
         rt2: Route = self.sol.routes[top.positionOfSecondRoute]
 
@@ -613,6 +649,10 @@ class Solver:
 
             # reversedSegmentList = list(reversed(rt1.sequenceOfNodes[top.positionOfFirstNode + 1: top.positionOfSecondNode + 1]))
             # rt1.sequenceOfNodes[top.positionOfFirstNode + 1: top.positionOfSecondNode + 1] = reversedSegmentList
+
+            # Make involved nodes tabu
+            self.SetTabuIterator(rt1.sequenceOfNodes[top.positionOfFirstNode], localSearchIterator)
+            self.SetTabuIterator(rt1.sequenceOfNodes[top.positionOfSecondNode], localSearchIterator)
 
             rt1.cost += top.moveCost
 
@@ -628,6 +668,9 @@ class Solver:
 
             rt1.sequenceOfNodes.extend(relocatedSegmentOfRt2)
             rt2.sequenceOfNodes.extend(relocatedSegmentOfRt1)
+
+            self.SetTabuIterator(rt1.sequenceOfNodes[top.positionOfFirstNode], localSearchIterator)
+            self.SetTabuIterator(rt2.sequenceOfNodes[top.positionOfSecondNode], localSearchIterator)
 
             self.UpdateRouteCostAndLoad(rt1)
             self.UpdateRouteCostAndLoad(rt2)
@@ -684,3 +727,42 @@ class Solver:
         self.sol.cost += insertion.cost
         rt.load += insCustomer.demand
         insCustomer.isRouted = True
+
+    def MoveIsTabu(self, n: Node, iterator, moveCost):
+            # found better solution --> not tabu
+            if moveCost + self.sol.cost < self.bestSolution.cost - 0.001:
+                return False
+
+            # if the desired number of loops has not passed --> node IS still tabu
+            if iterator < n.isTabuTillIterator:
+                return True
+
+            # None of the conditions resolve so node IS NOT tabu
+            return False
+
+    def SetTabuIterator(self, n: Node, iterator):
+        # n.isTabuTillIterator = iterator + self.tabuTenure
+
+        # Make a particular node tabu by changing the attribute isTabuTillIterator to point to a specific iteration UNTIL node CANT BE TOUCHED 
+        n.isTabuTillIterator = iterator + random.randint(self.minTabuTenure, self.maxTabuTenure)
+
+    def TestSolution(self):
+        totalSolCost = 0
+        for r in range (0, len(self.sol.routes)):
+            rt: Route = self.sol.routes[r]
+            rtCost = 0
+            rtLoad = 0
+            for n in range (0 , len(rt.sequenceOfNodes) - 1):
+                A = rt.sequenceOfNodes[n]
+                B = rt.sequenceOfNodes[n + 1]
+                rtCost += self.distanceMatrix[A.ID][B.ID]
+                rtLoad += A.demand
+            if abs(rtCost - rt.cost) > 0.0001:
+                print ('Route Cost problem')
+            if rtLoad != rt.load:
+                print ('Route Load problem')
+
+            totalSolCost += rt.cost
+
+        if abs(totalSolCost - self.sol.cost) > 0.0001:
+            print('Solution Cost problem')
